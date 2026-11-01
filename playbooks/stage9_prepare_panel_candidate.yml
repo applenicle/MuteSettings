@@ -1,0 +1,51 @@
+---
+# Stage 9: discover exact running NL panel image digest, then prepare an
+# OFFLINE-only Compose candidate on PL. No docker start, SQL writes, or DNS.
+- name: Discover immutable production panel image on NL
+  hosts: nl
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Refuse unexpected NL host alias
+      ansible.builtin.assert:
+        that:
+          - inventory_hostname == 'nl'
+
+    - name: Find exact digest of running Remnawave image (read-only)
+      ansible.builtin.script: "{{ playbook_dir }}/../scripts/stage9_nl_image_digest.sh"
+      register: stage9_digest
+      changed_when: false
+
+    - name: Require immutable digest, not a mutable tag
+      ansible.builtin.assert:
+        that:
+          - stage9_digest.stdout | trim is match('^remnawave/backend@sha256:[0-9a-f]{64}$')
+
+- name: Prepare isolated non-running PL panel candidate
+  hosts: pl
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Refuse unexpected PL host alias
+      ansible.builtin.assert:
+        that:
+          - inventory_hostname == 'pl'
+          - hostvars['nl'].stage9_digest is defined
+
+    - name: Prepare candidate and validate effective Compose without starting anything
+      ansible.builtin.script: >-
+        {{ playbook_dir }}/../scripts/stage9_prepare_offline_candidate.py
+        {{ hostvars['nl'].stage9_digest.stdout | trim | quote }}
+      register: stage9_candidate
+      changed_when: "'STAGE9_ALREADY_PREPARED=YES' not in stage9_candidate.stdout"
+
+    - name: Show only safe Stage 9 completion summary
+      ansible.builtin.debug:
+        msg:
+          - 'STAGE9_COMPOSE_PARSE=PASS'
+          - 'STAGE9_INTERNAL_NETWORK_ONLY=YES'
+          - 'STAGE9_PUBLISHED_PORTS=ZERO'
+          - 'STAGE9_PANEL_IMAGE_DIGEST_PINNED=YES'
+          - 'STAGE9_STAGE7_DATABASE_REMAINS_COLD=YES'
+          - 'STAGE9_PRODUCTION_CHANGES=NONE'
+          - 'STAGE9_OFFLINE_PANEL_CANDIDATE=READY'
