@@ -1,0 +1,26 @@
+---
+# MuteVPN Stage 7: prepare only a cold, isolated Remnawave PG18 staging copy on PL.
+# Stage 3/4 verified backups are required. DOES NOT start panel, bot or ingress.
+- name: Create verified cold Remnawave PostgreSQL 18 staging database on Poland
+  hosts: pl
+  become: true
+  gather_facts: false
+  vars:
+    stage7_snapshot_id: '20261101T125729Z'
+  tasks:
+    - name: Refuse every host other than PL
+      ansible.builtin.assert:
+        that:
+          - inventory_hostname == 'pl'
+        fail_msg: 'Only PL may be modified at Stage 7.'
+
+    - name: Restore verified Remnawave backup into a cold isolated PG18 Docker volume
+      ansible.builtin.script: "{{ playbook_dir }}/../scripts/stage7_prepare_panel_pg18.sh {{ stage7_snapshot_id }}"
+      register: stage7_result
+      changed_when: "'STAGE7_PANEL_DB_PREPARED=YES' in stage7_result.stdout"
+
+    - name: Report no live production cutover has occurred
+      ansible.builtin.debug:
+        msg:
+          - "{{ stage7_result.stdout_lines }}"
+          - 'NEXT=READ_ONLY_PANEL_CONFIG_AUDIT_BEFORE_STAGING_APP'
