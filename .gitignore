@@ -1,0 +1,49 @@
+# Secrets and credentials (do not commit even to a private repository)
+.env
+.env.*
+!.env.example
+*.secret
+*.secrets
+secrets/
+**/secrets/
+**/credentials/
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+known_hosts*
+ssh_config
+*.tfstate*
+*.vault
+vault-password*
+
+# Live inventory and private production configs
+inventory.yml
+inventory.yaml
+hosts.ini
+**/production.env
+**/config.json
+
+# Customer data, backups, dumps and logs
+*.dump
+*.sql
+*.sql.gz
+*.tar
+*.tar.gz
+*.zip
+*.bak
+*.backup
+backups/
+artifacts/
+logs/
+*.log
+*.sqlite*
+
+# Tool and editor clutter
+__pycache__/
+.venv/
+.vscode/
+.idea/
+.DS_Store

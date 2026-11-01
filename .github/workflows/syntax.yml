@@ -1,0 +1,25 @@
+name: Shell syntax
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  bash-syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check bash syntax
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' file; do
+            bash -n "$file"
+          done < <(find scripts -type f -name '*.sh' -print0)
+      - name: Reject tracked sensitive file types
+        run: |
+          set -euo pipefail
+          if git ls-files | grep -Ei '(^|/)(\.env($|\.)|id_(rsa|ed25519)|known_hosts|secrets/|credentials/|backups/)|\.(dump|sql|pem|key|p12|pfx|sqlite|backup)$'; then
+            echo 'Potential secret or dump tracked. Remove it before merging.'
+            exit 1
+          fi

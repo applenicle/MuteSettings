@@ -1,0 +1,12 @@
+# Example only. Set real ansible_host/IP values in a local, IGNORED inventory.yml.
+all:
+  hosts:
+    pl:
+      ansible_host: REPLACE_WITH_PL_IP
+      ansible_user: root
+    fi:
+      ansible_host: REPLACE_WITH_FI_IP
+      ansible_user: root
+    nl:
+      ansible_host: REPLACE_WITH_NL_IP
+      ansible_user: root
