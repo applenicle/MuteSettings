@@ -1,0 +1,153 @@
+---
+# MuteVPN Stage 6: resource-constrained (1 vCPU / ~2 GB) preparation.
+# PL: primary later; FI: cold standby later; NL: remains live production.
+# Never starts/stops/recreates a container, modifies DNS, or changes PostgreSQL.
+- name: Prepare lightweight PL/FI without touching running services
+  hosts: "pl:fi"
+  become: true
+  gather_facts: false
+  vars:
+    swap_file: /var/lib/mutevpn/mutevpn-extra.swap
+    swap_mb_by_host:
+      pl: 1536
+      fi: 1024
+    min_disk_left_mb_by_host:
+      pl: 4096
+      fi: 3072
+    dirs:
+      - { path: /opt/mutevpn, mode: '0750' }
+      - { path: /opt/mutevpn/remnawave, mode: '0750' }
+      - { path: /opt/mutevpn/backend, mode: '0750' }
+      - { path: /opt/mutevpn/infrastructure, mode: '0750' }
+      - { path: /etc/mutevpn, mode: '0700' }
+      - { path: /srv/mutevpn, mode: '0700' }
+      - { path: /srv/mutevpn/postgres, mode: '0700' }
+      - { path: /srv/mutevpn/redis, mode: '0700' }
+      - { path: /var/backups/mutevpn, mode: '0700' }
+      - { path: /var/lib/mutevpn, mode: '0700' }
+  tasks:
+    - name: Require explicit host aliases (never modify NL)
+      ansible.builtin.assert:
+        that:
+          - inventory_hostname in ['pl', 'fi']
+        fail_msg: 'STOP: only pl and fi may be prepared by this playbook'
+
+    - name: Check disk space and filesystem type without changes
+      ansible.builtin.shell: |
+        set -eu
+        df -Pk / | awk 'END {print $4}'
+        findmnt -n -o FSTYPE /
+      args:
+        executable: /bin/bash
+      register: disk_data
+      changed_when: false
+
+    - name: Check existing swap file
+      ansible.builtin.stat:
+        path: "{{ swap_file }}"
+      register: existing_swap_file
+
+    - name: Show current active swap files
+      ansible.builtin.command: swapon --noheadings --output=NAME
+      register: active_swap
+      changed_when: false
+
+    - name: Safeguard disk and prevent overwriting preexisting swap
+      ansible.builtin.assert:
+        that:
+          - disk_data.stdout_lines | length >= 2
+          - disk_data.stdout_lines[1] in ['ext4', 'xfs']
+          - (disk_data.stdout_lines[0] | int) > (((min_disk_left_mb_by_host[inventory_hostname] | int) + ((swap_mb_by_host[inventory_hostname] | int) if not existing_swap_file.stat.exists else 0)) * 1024)
+          - not (existing_swap_file.stat.exists and swap_file not in active_swap.stdout_lines)
+        fail_msg: 'STOP: disk/filesystem constraint or unexpected inactive swap file. No existing data deleted.'
+
+    - name: Create standard directories (never touch existing Docker volumes)
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "{{ item.mode }}"
+      loop: "{{ dirs }}"
+
+    - name: Reserve extra swap file if absent
+      ansible.builtin.command:
+        cmd: "fallocate -l {{ swap_mb_by_host[inventory_hostname] }}M {{ swap_file }}"
+        creates: "{{ swap_file }}"
+      register: swap_allocate
+
+    - name: Restrict new swap file permissions
+      ansible.builtin.file:
+        path: "{{ swap_file }}"
+        state: file
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Format only a newly created swap file
+      ansible.builtin.command: "mkswap {{ swap_file }}"
+      when: swap_allocate.changed
+
+    - name: Activate swap without reboot or restarting Docker
+      ansible.builtin.command: "swapon {{ swap_file }}"
+      when: swap_file not in active_swap.stdout_lines
+
+    - name: Persist additional swap through reboot
+      ansible.builtin.lineinfile:
+        path: /etc/fstab
+        regexp: '^/var/lib/mutevpn/mutevpn-extra\.swap\s'
+        line: "{{ swap_file }} none swap sw,nofail 0 0"
+        state: present
+        backup: true
+
+    - name: Report final memory, swap and disk availability
+      ansible.builtin.shell: |
+        set -eu
+        free -m | awk '/^Mem:/ {printf "RAM_MIB_TOTAL=%s RAM_MIB_AVAILABLE=%s\n",$2,$7} /^Swap:/ {printf "SWAP_MIB_TOTAL=%s SWAP_MIB_FREE=%s\n",$2,$4}'
+        swapon --show=NAME,SIZE --noheadings
+        df -hP / | tail -n 1
+      args:
+        executable: /bin/bash
+      register: prepared_resources
+      changed_when: false
+
+    - name: Print safe stage 6 preparation result
+      ansible.builtin.debug:
+        msg:
+          - "STAGE6_PREPARED_HOST={{ inventory_hostname }}"
+          - "{{ prepared_resources.stdout_lines }}"
+          - "DOCKER_RESTARTS=0; DATABASE_CHANGES=0; DNS_CHANGES=0; BOT_STARTED=NO"
+
+- name: Read-only service map for memory-constrained deployment design
+  hosts: "nl:pl:fi"
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Gather container memory, compose metadata and mount paths (no env values)
+      ansible.builtin.shell: |
+        set -eu
+        printf 'HOST=%s\n' "$(hostname -s)"
+        printf '\nCONTAINER_MEMORY_AND_CPU\n'
+        timeout 35 docker stats --no-stream --format {% raw %}'{{.Name}} | {{.MemUsage}} | {{.CPUPerc}}'{% endraw %} || true
+        printf '\nDOCKER_CONTAINER_STATUS\n'
+        docker ps -a --format {% raw %}'{{.Names}} | {{.Status}} | {{.Image}}'{% endraw %} | grep -Ei 'mutevpn|remna|redis|postgres|valkey' || true
+        printf '\nCOMPOSE_LAYOUT\n'
+        for NAME in remnawave remnawave-db remnawave-redis remnawave-subscription-page remnawave-nginx remnanode mutevpn_remnawave-web-1 mutevpn_remnawave-worker-1 mutevpn_remnawave-bot-1 mutevpn_remnawave-db-1 mutevpn_remnawave-redis-1 mutevpn_staging-bot-1; do
+          if docker inspect "$NAME" >/dev/null 2>&1; then
+            docker inspect -f {% raw %}'NAME={{.Name}} PROJECT={{index .Config.Labels "com.docker.compose.project"}} SERVICE={{index .Config.Labels "com.docker.compose.service"}} CONFIG_PATH={{index .Config.Labels "com.docker.compose.project.config_files"}} WORKDIR={{index .Config.Labels "com.docker.compose.project.working_dir"}} MEMORY_LIMIT_BYTES={{.HostConfig.Memory}} MOUNTS={{range .Mounts}}{{.Type}}:{{if eq .Type "volume"}}{{.Name}}{{else}}{{.Source}}{{end}}:{{.Destination}};{{end}}'{% endraw %} "$NAME"
+          fi
+        done
+        printf '\nNETWORK_AND_PORTS\n'
+        docker ps --format {% raw %}'{{.Names}} | {{.Ports}}'{% endraw %} | grep -Ei 'mutevpn|remna' || true
+      args:
+        executable: /bin/bash
+      register: service_map
+      changed_when: false
+
+    - name: Print non-secret metadata for the next deployment phase
+      ansible.builtin.debug:
+        msg: "{{ service_map.stdout_lines }}"
+
+    - name: Mark safe completion
+      ansible.builtin.debug:
+        msg: "STAGE6_LITE_PREPARE_AND_SERVICE_MAP=COMPLETE host={{ inventory_hostname }}"
