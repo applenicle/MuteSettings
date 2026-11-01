@@ -1,0 +1,20 @@
+---
+# Inspect NL panel deployment contract without dumping any secret env values.
+- name: Read-only production Remnawave runtime contract
+  hosts: nl
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Require NL alias
+      ansible.builtin.assert:
+        that:
+          - inventory_hostname == 'nl'
+
+    - name: Record safe panel metadata and environment variable names only
+      ansible.builtin.script: "{{ playbook_dir }}/../scripts/stage7_panel_contract_readonly.py"
+      register: panel_contract
+      changed_when: false
+
+    - name: Print redacted runtime contract
+      ansible.builtin.debug:
+        var: panel_contract.stdout_lines
