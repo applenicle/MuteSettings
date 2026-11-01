@@ -47,8 +47,12 @@
         path: "{{ swap_file }}"
       register: existing_swap_file
 
-    - name: Show current active swap files
-      ansible.builtin.command: swapon --noheadings --output=NAME
+    - name: Read active swap device names from Linux procfs (compatible with older swapon)
+      ansible.builtin.shell: |
+        set -eu
+        awk 'NR > 1 { print $1 }' /proc/swaps
+      args:
+        executable: /bin/bash
       register: active_swap
       changed_when: false
 
@@ -104,7 +108,7 @@
       ansible.builtin.shell: |
         set -eu
         free -m | awk '/^Mem:/ {printf "RAM_MIB_TOTAL=%s RAM_MIB_AVAILABLE=%s\n",$2,$7} /^Swap:/ {printf "SWAP_MIB_TOTAL=%s SWAP_MIB_FREE=%s\n",$2,$4}'
-        swapon --show=NAME,SIZE --noheadings
+        awk 'NR > 1 {printf "SWAP_DEVICE=%s SIZE_KIB=%s USED_KIB=%s\n", $1, $3, $4}' /proc/swaps
         df -hP / | tail -n 1
       args:
         executable: /bin/bash
