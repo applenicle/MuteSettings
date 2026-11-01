@@ -1,0 +1,210 @@
+---
+# Stage 8: copy NL Remnawave reference configuration to root-only storage on PL.
+# No panel/container starts; no public ports; no DNS changes. No secret values printed.
+- name: Stage 8 - inspect and securely read active NL Remnawave reference files
+  hosts: nl
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Refuse unexpected source host
+      ansible.builtin.assert:
+        that:
+          - inventory_hostname == 'nl'
+
+    - name: Confirm active NL Remnawave panel
+      ansible.builtin.command:
+        argv:
+          - docker
+          - inspect
+          - -f
+          - '{% raw %}{{.State.Running}}{% endraw %}'
+          - remnawave
+      register: stage8_nl_running
+      changed_when: false
+
+    - name: Refuse copying from inactive source panel
+      ansible.builtin.assert:
+        that:
+          - stage8_nl_running.stdout | trim == 'true'
+
+    - name: Check exact source files without reading secrets into output
+      ansible.builtin.stat:
+        path: '{{ item }}'
+        checksum_algorithm: sha256
+      loop:
+        - /opt/remnawave/.env
+        - /opt/remnawave/docker-compose.yml
+        - /opt/remnawave/nginx.conf
+      register: stage8_nl_source_files
+      no_log: true
+
+    - name: Refuse missing, empty or suspiciously large source files
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists | default(false)
+          - item.stat.isreg | default(false)
+          - (item.stat.size | int) > 0
+          - (item.stat.size | int) < 262144
+        fail_msg: 'NL reference file missing or oversized; refusing Stage 8 transfer.'
+      loop: '{{ stage8_nl_source_files.results }}'
+      loop_control:
+        label: 'source-file-check'
+      no_log: true
+
+    - name: Read NL panel env (secret - never print or log)
+      ansible.builtin.slurp:
+        src: /opt/remnawave/.env
+      register: stage8_nl_env
+      no_log: true
+
+    - name: Read NL panel compose (potentially sensitive - never print)
+      ansible.builtin.slurp:
+        src: /opt/remnawave/docker-compose.yml
+      register: stage8_nl_compose
+      no_log: true
+
+    - name: Read NL nginx reference (potentially sensitive - never print)
+      ansible.builtin.slurp:
+        src: /opt/remnawave/nginx.conf
+      register: stage8_nl_nginx
+      no_log: true
+
+    - name: Report reference source collected safely
+      ansible.builtin.debug:
+        msg: 'STAGE8_NL_REFERENCE_CAPTURED=YES (all contents redacted)'
+
+- name: Stage 8 - prepare inaccessible and non-running panel reference on PL
+  hosts: pl
+  become: true
+  gather_facts: false
+  vars:
+    stage8_dir: /etc/mutevpn/remnawave/stage8-reference
+  tasks:
+    - name: Refuse unexpected destination host
+      ansible.builtin.assert:
+        that:
+          - inventory_hostname == 'pl'
+          - hostvars['nl'].stage8_nl_env is defined
+          - hostvars['nl'].stage8_nl_compose is defined
+          - hostvars['nl'].stage8_nl_nginx is defined
+
+    - name: Verify Stage 7 cold PG18 volume exists
+      ansible.builtin.command:
+        argv:
+          - docker
+          - volume
+          - inspect
+          - mutevpn_stage7_panel_pg18
+      changed_when: false
+      no_log: true
+
+    - name: Check Stage 7 container is stopped
+      ansible.builtin.command:
+        argv:
+          - docker
+          - inspect
+          - -f
+          - '{% raw %}{{.State.Status}}{% endraw %}'
+          - mutevpn-stage7-panel-pg18
+      register: stage8_pg18_state
+      changed_when: false
+
+    - name: Refuse while staged database is running
+      ansible.builtin.assert:
+        that:
+          - stage8_pg18_state.stdout | trim == 'exited'
+        fail_msg: 'Stage 7 PG18 must remain stopped during Stage 8.'
+
+    - name: Confirm existing Stage 7 completion marker and password file
+      ansible.builtin.stat:
+        path: '{{ item }}'
+      loop:
+        - /var/lib/mutevpn/stage7_panel_pg18.ready
+        - /etc/mutevpn/stage7_panel_pg18.password
+      register: stage8_pg18_markers
+      no_log: true
+
+    - name: Refuse missing Stage 7 completion evidence
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists | default(false)
+          - item.stat.isreg | default(false)
+        fail_msg: 'Stage 7 completion evidence missing; do not proceed.'
+      loop: '{{ stage8_pg18_markers.results }}'
+      loop_control:
+        label: 'stage7-marker-check'
+      no_log: true
+
+    - name: Create root-only reference directory (no production paths changed)
+      ansible.builtin.file:
+        path: '{{ stage8_dir }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Store NL env as a deliberately non-loadable reference file
+      ansible.builtin.copy:
+        content: "{{ hostvars['nl'].stage8_nl_env.content | b64decode }}"
+        dest: '{{ stage8_dir }}/panel-source.env.disabled'
+        owner: root
+        group: root
+        mode: '0600'
+        backup: false
+      no_log: true
+
+    - name: Store NL compose as a disabled reference file
+      ansible.builtin.copy:
+        content: "{{ hostvars['nl'].stage8_nl_compose.content | b64decode }}"
+        dest: '{{ stage8_dir }}/panel-source-compose.yml.disabled'
+        owner: root
+        group: root
+        mode: '0600'
+        backup: false
+      no_log: true
+
+    - name: Store NL nginx config as a disabled reference file
+      ansible.builtin.copy:
+        content: "{{ hostvars['nl'].stage8_nl_nginx.content | b64decode }}"
+        dest: '{{ stage8_dir }}/panel-source-nginx.conf.disabled'
+        owner: root
+        group: root
+        mode: '0600'
+        backup: false
+      no_log: true
+
+    - name: Calculate checksums of PL private reference files
+      ansible.builtin.stat:
+        path: '{{ item }}'
+        checksum_algorithm: sha256
+      loop:
+        - '{{ stage8_dir }}/panel-source.env.disabled'
+        - '{{ stage8_dir }}/panel-source-compose.yml.disabled'
+        - '{{ stage8_dir }}/panel-source-nginx.conf.disabled'
+      register: stage8_pl_files
+      no_log: true
+
+    - name: Verify all source-to-destination SHA-256 hashes match
+      ansible.builtin.assert:
+        that:
+          - stage8_pl_files.results[0].stat.checksum == hostvars['nl'].stage8_nl_source_files.results[0].stat.checksum
+          - stage8_pl_files.results[1].stat.checksum == hostvars['nl'].stage8_nl_source_files.results[1].stat.checksum
+          - stage8_pl_files.results[2].stat.checksum == hostvars['nl'].stage8_nl_source_files.results[2].stat.checksum
+        fail_msg: 'STAGE8_SHA256_MISMATCH - do not use transferred configuration.'
+      no_log: true
+
+    - name: Read-only audit for PL candidate safety and copied env keys
+      ansible.builtin.script: '{{ playbook_dir }}/../scripts/stage8_safe_audit.py'
+      register: stage8_audit
+      changed_when: false
+
+    - name: Report safe completion markers only
+      ansible.builtin.debug:
+        msg:
+          - '{{ stage8_audit.stdout_lines }}'
+          - 'STAGE8_CONFIG_SOURCE_TO_PL_SHA256=VERIFIED'
+          - 'STAGE8_PANEL_PROCESS_STARTED=NO'
+          - 'STAGE8_NGINX_OR_VPN_RESTARTS=NO'
+          - 'STAGE8_BOT_STARTED=NO'
+          - 'STAGE8_COMPLETED=YES'
+          - 'NEXT=BUILD_CONSTRAINED_PANEL_COMPOSE_AND_TEST_ISOLATION'
